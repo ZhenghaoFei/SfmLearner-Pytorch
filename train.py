@@ -74,6 +74,10 @@ parser.add_argument('-f', '--training-output-freq', type=int,
                     help='frequence for outputting dispnet outputs and warped imgs at training for all scales. '
                          'if 0, will not output',
                     metavar='N', default=0)
+parser.add_argument('--dispnet_type', default='single', metavar='STR',
+                    help='dispnet type, single: current frame (from original code) '
+                    'triple: use frame n, n+1, n-1 as input for dispnet (to capture parallax from motion)')
+
 
 best_error = -1
 n_iter = 0
@@ -153,8 +157,12 @@ def main():
 
     # create model
     print("=> creating model")
+    print("dispnet_type: ", args.dispnet_type)
+    if args.dispnet_type == 'single':
+        disp_net = models.DispNetS().to(device)
+    elif args.dispnet_type == 'triple':
+        disp_net = models.DispNetSTri(nb_ref_imgs=args.sequence_length - 1).to(device)
 
-    disp_net = models.DispNetS().to(device)
     output_exp = args.mask_loss_weight > 0
     if not output_exp:
         print("=> no mask loss, PoseExpnet will only output pose")
@@ -278,12 +286,17 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
 
         # measure data loading time
         data_time.update(time.time() - end)
+
         tgt_img = tgt_img.to(device)
+
         ref_imgs = [img.to(device) for img in ref_imgs]
         intrinsics = intrinsics.to(device)
 
         # compute output
-        disparities = disp_net(tgt_img)
+        if args.dispnet_type == 'triple':
+            disparities = disp_net(tgt_img, ref_imgs)
+        else:
+            disparities = disp_net(tgt_img)
         depth = [1/disp for disp in disparities]
         explainability_mask, pose = pose_exp_net(tgt_img, ref_imgs)
 
@@ -354,6 +367,7 @@ def validate_without_gt(args, val_loader, disp_net, pose_exp_net, epoch, logger,
 
     end = time.time()
     logger.valid_bar.update(0)
+    print("validation dispnet_type: ", args.dispnet_type)
     for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv) in enumerate(val_loader):
         tgt_img = tgt_img.to(device)
         ref_imgs = [img.to(device) for img in ref_imgs]
@@ -361,7 +375,11 @@ def validate_without_gt(args, val_loader, disp_net, pose_exp_net, epoch, logger,
         intrinsics_inv = intrinsics_inv.to(device)
 
         # compute output
-        disp = disp_net(tgt_img)
+        if args.dispnet_type == 'triple':
+            disp = disp_net(tgt_img, ref_imgs)
+        else:
+            disp = disp_net(tgt_img)
+
         depth = 1/disp
         explainability_mask, pose = pose_exp_net(tgt_img, ref_imgs)
 

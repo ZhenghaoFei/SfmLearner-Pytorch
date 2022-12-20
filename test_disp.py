@@ -8,6 +8,7 @@ import argparse
 from tqdm import tqdm
 
 from models import DispNetS, PoseExpNet
+import models
 
 
 parser = argparse.ArgumentParser(description='Script for DispNet testing with corresponding groundTruth',
@@ -29,6 +30,11 @@ parser.add_argument("--gps", '-g', action='store_true',
                     help='if selected, will get displacement from GPS for KITTI. Otherwise, will integrate speed')
 parser.add_argument("--img-exts", default=['png', 'jpg', 'bmp'], nargs='*', type=str, help="images extensions to glob")
 
+parser.add_argument('--dispnet_type', default='single', metavar='STR',
+                    help='dispnet type, single: current frame (from original code) '
+                    'triple: use frame n, n+1, n-1 as input for dispnet (to capture parallax from motion)')
+
+
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
@@ -36,11 +42,20 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cp
 def main():
     args = parser.parse_args()
     if args.gt_type == 'KITTI':
-        from kitti_eval.depth_evaluation_utils import test_framework_KITTI as test_framework
+        if args.dispnet_type == 'triple':
+            from kitti_eval.depth_evaluation_utils import test_framework_KITTI_triple as test_framework
+        else:
+            from kitti_eval.depth_evaluation_utils import test_framework_KITTI as test_framework
     elif args.gt_type == 'stillbox':
         from stillbox_eval.depth_evaluation_utils import test_framework_stillbox as test_framework
 
-    disp_net = DispNetS().to(device)
+    print("=> creating model")
+    print("dispnet_type: ", args.dispnet_type)
+    if args.dispnet_type == 'single':
+        disp_net = models.DispNetS().to(device)
+    elif args.dispnet_type == 'triple':
+        disp_net = models.DispNetSTri(nb_ref_imgs=2).to(device)
+
     weights = torch.load(args.pretrained_dispnet)
     disp_net.load_state_dict(weights['state_dict'])
     disp_net.eval()
@@ -54,6 +69,9 @@ def main():
         seq_length = int(weights['state_dict']['conv1.0.weight'].size(1)/3)
         pose_net = PoseExpNet(nb_ref_imgs=seq_length - 1, output_exp=False).to(device)
         pose_net.load_state_dict(weights['state_dict'], strict=False)
+    
+    if args.dispnet_type == 'triple':
+        seq_length = 3
 
     dataset_dir = Path(args.dataset_dir)
     if args.dataset_list is not None:
@@ -61,6 +79,9 @@ def main():
             test_files = list(f.read().splitlines())
     else:
         test_files = [file.relpathto(dataset_dir) for file in sum([dataset_dir.files('*.{}'.format(ext)) for ext in args.img_exts], [])]
+
+
+    print("seq_length", seq_length)
 
     framework = test_framework(dataset_dir, test_files, seq_length,
                                args.min_depth, args.max_depth,
@@ -88,12 +109,24 @@ def main():
         tgt_img = torch.from_numpy(tgt_img).unsqueeze(0)
         tgt_img = ((tgt_img/255 - 0.5)/0.5).to(device)
 
+
         for i, img in enumerate(ref_imgs):
             img = torch.from_numpy(img).unsqueeze(0)
             img = ((img/255 - 0.5)/0.5).to(device)
             ref_imgs[i] = img
 
-        pred_disp = disp_net(tgt_img).cpu().numpy()[0,0]
+        if args.dispnet_type == 'triple':
+            # Reorganize ref_imgs : tgt is middle frame but not necessarily the one used in DispNetS
+            # (in case sample to test was in end or beginning of the image sequence)
+            middle_index = seq_length//2
+            tgt = ref_imgs[middle_index]
+            reorganized_refs = ref_imgs[:middle_index] + ref_imgs[middle_index + 1:]
+            pred_disp = disp_net(tgt_img, reorganized_refs).cpu().numpy()[0,0]
+        else:
+            pred_disp = disp_net(tgt_img).cpu().numpy()[0,0]
+
+
+
 
         if args.output_dir is not None:
             if j == 0:
@@ -111,7 +144,7 @@ def main():
             pred_depth_zoomed = pred_depth_zoomed[sample['mask']]
             gt_depth = gt_depth[sample['mask']]
 
-        if seq_length > 1:
+        if seq_length > 1 and args.pretrained_posenet is not None:
             # Reorganize ref_imgs : tgt is middle frame but not necessarily the one used in DispNetS
             # (in case sample to test was in end or beginning of the image sequence)
             middle_index = seq_length//2

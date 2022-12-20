@@ -34,6 +34,31 @@ class test_framework_KITTI(object):
         return len(self.img_files)
 
 
+class test_framework_KITTI_triple(object):
+    def __init__(self, root, test_files, seq_length=3, min_depth=1e-3, max_depth=100, step=1, use_gps=True):
+        self.root = root
+        self.min_depth, self.max_depth = min_depth, max_depth
+        self.use_gps = use_gps
+        self.calib_dirs, self.gt_files, self.img_files, self.displacements, self.cams = read_scene_data(self.root,
+                                                                                                        test_files,
+                                                                                                        seq_length,
+                                                                                                        step,
+                                                                                                        self.use_gps)
+
+    def __getitem__(self, i):
+        tgt = imread(self.img_files[i][0]).astype(np.float32)
+        depth = generate_depth_map(self.calib_dirs[i], self.gt_files[i], tgt.shape[:2], self.cams[i])
+        return {'tgt': tgt,
+                'ref': [imread(img).astype(np.float32) for img in self.img_files[i][1]],
+                'path':self.img_files[i][0],
+                'gt_depth': depth,
+                'displacements': np.array(self.displacements[i]),
+                'mask': generate_mask(depth, self.min_depth, self.max_depth)
+                }
+
+    def __len__(self):
+        return len(self.img_files)
+
 ###############################################################################
 #  EIGEN
 
@@ -125,10 +150,13 @@ def read_scene_data(data_root, test_list, seq_length=3, step=1, use_gps=True):
         date, scene, cam_id, _, index = sample[:-4].split('/')
 
         scene_length = len(tgt_img_path.parent.files('*.png'))
+        # print("tgt_img_path", tgt_img_path)
 
         ref_indices = shift_range + np.clip(int(index), step*demi_length, scene_length - step*demi_length - 1)
+        # print("ref_indices", ref_indices)
 
         ref_imgs_path = [tgt_img_path.dirname()/'{:010d}.png'.format(i) for i in ref_indices]
+        # print("ref_imgs_path", ref_imgs_path)
         vel_path = data_root/date/scene/'velodyne_points'/'data'/'{}.bin'.format(index[:10])
 
         if tgt_img_path.isfile():
@@ -144,7 +172,7 @@ def read_scene_data(data_root, test_list, seq_length=3, step=1, use_gps=True):
                 displacements.append(get_displacements_from_speed(*args))
         else:
             print('{} missing'.format(tgt_img_path))
-
+        
     return calib_dirs, gt_files, im_files, displacements, cams
 
 
